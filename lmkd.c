@@ -845,7 +845,7 @@ static char *proc_get_name(int pid, char *buf, size_t buf_size) {
     return buf;
 }
 
-static void cmd_procprio(LMKD_CTRL_PACKET packet) {
+static void cmd_procprio(LMKD_CTRL_PACKET packet, int field_count) {
     struct proc *procp;
     char path[LINE_MAX];
     char val[20];
@@ -855,11 +855,16 @@ static void cmd_procprio(LMKD_CTRL_PACKET packet) {
     struct passwd *pwdrec;
     int tgid;
 
-    lmkd_pack_get_procprio(packet, &params);
+    lmkd_pack_get_procprio(packet, field_count, &params);
 
     if (params.oomadj < OOM_SCORE_ADJ_MIN ||
         params.oomadj > OOM_SCORE_ADJ_MAX) {
         ALOGE("Invalid PROCPRIO oomadj argument %d", params.oomadj);
+        return;
+    }
+
+    if (params.ptype < PROC_TYPE_FIRST || params.ptype >= PROC_TYPE_COUNT) {
+        ALOGE("Invalid PROCPRIO process type argument %d", params.ptype);
         return;
     }
 
@@ -889,7 +894,8 @@ static void cmd_procprio(LMKD_CTRL_PACKET packet) {
         return;
     }
 
-    if (per_app_memcg) {
+    /* lmkd should not change soft limits for services */
+    if (params.ptype == PROC_TYPE_APP && per_app_memcg) {
         if (params.oomadj >= 900) {
             soft_limit_mult = 0;
         } else if (params.oomadj >= 800) {
@@ -1215,9 +1221,10 @@ static void ctrl_command_handler(int dsock_idx) {
         cmd_target(targets, packet);
         break;
     case LMK_PROCPRIO:
-        if (nargs != 3)
+        /* process type field is optional for backward compatibility */
+        if (nargs < 3 || nargs > 4)
             goto wronglen;
-        cmd_procprio(packet);
+        cmd_procprio(packet, nargs);
         break;
     case LMK_PROCREMOVE:
         if (nargs != 1)
