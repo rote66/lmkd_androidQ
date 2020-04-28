@@ -41,6 +41,7 @@
 #include <cutils/properties.h>
 #include <cutils/sched_policy.h>
 #include <cutils/sockets.h>
+#include <liblmkd_utils.h>
 #include <lmkd.h>
 #include <log/log.h>
 #include <log/log_event_list.h>
@@ -139,6 +140,8 @@
 #define DEF_PARTIAL_STALL 70
 /* ro.lmk.psi_complete_stall_ms property defaults */
 #define DEF_COMPLETE_STALL 700
+
+#define LMKD_REINIT_PROP "lmkd.reinit"
 
 static inline int sys_pidfd_open(pid_t pid, unsigned int flags) {
     return syscall(__NR_pidfd_open, pid, flags);
@@ -520,6 +523,10 @@ static uint32_t killcnt_total = 0;
 
 /* PAGE_SIZE / 1024 */
 static long page_k;
+
+static void update_props();
+static bool init_monitors();
+static void destroy_monitors();
 
 static int clamp(int low, int high, int value) {
     return max(min(value, high), low);
@@ -1198,6 +1205,7 @@ static void ctrl_command_handler(int dsock_idx) {
     int nargs;
     int targets;
     int kill_cnt;
+    int result;
 
     len = ctrl_data_read(dsock_idx, (char *)packet, CTRL_PACKET_MAX_SIZE);
     if (len <= 0)
@@ -1243,6 +1251,29 @@ static void ctrl_command_handler(int dsock_idx) {
         len = lmkd_pack_set_getkillcnt_repl(packet, kill_cnt);
         if (ctrl_data_write(dsock_idx, (char *)packet, len) != len)
             return;
+        break;
+    case LMK_UPDATE_PROPS:
+        if (nargs != 0)
+            goto wronglen;
+        update_props();
+        if (!use_inkernel_interface) {
+            /* Reinitialize monitors to apply new settings */
+            destroy_monitors();
+            result = init_monitors() ? 0 : -1;
+        } else {
+            result = 0;
+        }
+        len = lmkd_pack_set_update_props_repl(packet, result);
+        if (ctrl_data_write(dsock_idx, (char *)packet, len) != len) {
+            ALOGE("Failed to report operation results");
+        }
+        if (!result) {
+            ALOGI("Properties reinitilized");
+        } else {
+            /* New settings can't be supported, crash to be restarted */
+            ALOGE("New configuration is not supported. Exiting...");
+            exit(1);
+        }
         break;
     default:
         ALOGE("Received unknown command code %d", cmd);
@@ -1747,9 +1778,9 @@ static void stop_wait_for_proc_kill(bool finished) {
 
     if (pidfd_supported) {
         /* unregister fd */
-        if (epoll_ctl(epollfd, EPOLL_CTL_DEL, last_kill_pid_or_fd, &epev) != 0) {
+        if (epoll_ctl(epollfd, EPOLL_CTL_DEL, last_kill_pid_or_fd, &epev)) {
+            // Log an error and keep going
             ALOGE("epoll_ctl for last killed process failed; errno=%d", errno);
-            return;
         }
         maxevents--;
         close(last_kill_pid_or_fd);
@@ -2511,10 +2542,15 @@ static bool init_mp_psi(enum vmpressure_level level, bool use_new_strategy) {
 static void destroy_mp_psi(enum vmpressure_level level) {
     int fd = mpevfd[level];
 
+    if (fd < 0) {
+        return;
+    }
+
     if (unregister_psi_monitor(epollfd, fd) < 0) {
         ALOGE("Failed to unregister psi monitor for %s memory pressure; errno=%d",
             level_name[level], errno);
     }
+    maxevents--;
     destroy_psi_monitor(fd);
     mpevfd[level] = -1;
 }
@@ -2617,9 +2653,58 @@ err_open_mpfd:
     return false;
 }
 
+static void destroy_mp_common(enum vmpressure_level level) {
+    struct epoll_event epev;
+    int fd = mpevfd[level];
+
+    if (fd < 0) {
+        return;
+    }
+
+    if (epoll_ctl(epollfd, EPOLL_CTL_DEL, fd, &epev)) {
+        // Log an error and keep going
+        ALOGE("epoll_ctl for level %s failed; errno=%d", level_name[level], errno);
+    }
+    maxevents--;
+    close(fd);
+    mpevfd[level] = -1;
+}
+
 static void kernel_event_handler(int data __unused, uint32_t events __unused,
                                  struct polling_params *poll_params __unused) {
     kpoll_info.handler(kpoll_info.poll_fd);
+}
+
+static bool init_monitors() {
+    /* Try to use psi monitor first if kernel has it */
+    use_psi_monitors = property_get_bool("ro.lmk.use_psi", true) &&
+        init_psi_monitors();
+    /* Fall back to vmpressure */
+    if (!use_psi_monitors &&
+        (!init_mp_common(VMPRESS_LEVEL_LOW) ||
+        !init_mp_common(VMPRESS_LEVEL_MEDIUM) ||
+        !init_mp_common(VMPRESS_LEVEL_CRITICAL))) {
+        ALOGE("Kernel does not support memory pressure events or in-kernel low memory killer");
+        return false;
+    }
+    if (use_psi_monitors) {
+        ALOGI("Using psi monitors for memory pressure detection");
+    } else {
+        ALOGI("Using vmpressure for memory pressure detection");
+    }
+    return true;
+}
+
+static void destroy_monitors() {
+    if (use_psi_monitors) {
+        destroy_mp_psi(VMPRESS_LEVEL_CRITICAL);
+        destroy_mp_psi(VMPRESS_LEVEL_MEDIUM);
+        destroy_mp_psi(VMPRESS_LEVEL_LOW);
+    } else {
+        destroy_mp_common(VMPRESS_LEVEL_CRITICAL);
+        destroy_mp_common(VMPRESS_LEVEL_MEDIUM);
+        destroy_mp_common(VMPRESS_LEVEL_LOW);
+    }
 }
 
 static int init(void) {
@@ -2687,22 +2772,11 @@ static int init(void) {
             }
         }
     } else {
-        /* Try to use psi monitor first if kernel has it */
-        use_psi_monitors = property_get_bool("ro.lmk.use_psi", true) &&
-            init_psi_monitors();
-        /* Fall back to vmpressure */
-        if (!use_psi_monitors &&
-            (!init_mp_common(VMPRESS_LEVEL_LOW) ||
-            !init_mp_common(VMPRESS_LEVEL_MEDIUM) ||
-            !init_mp_common(VMPRESS_LEVEL_CRITICAL))) {
-            ALOGE("Kernel does not support memory pressure events or in-kernel low memory killer");
+        if (!init_monitors()) {
             return -1;
         }
-        if (use_psi_monitors) {
-            ALOGI("Using psi monitors for memory pressure detection");
-        } else {
-            ALOGI("Using vmpressure for memory pressure detection");
-        }
+        /* let the others know it does support reporting kills */
+        property_set("sys.lmk.reportkills", "1");
     }
 
     for (i = 0; i <= ADJTOSLOT(OOM_SCORE_ADJ_MAX); i++) {
@@ -2784,7 +2858,7 @@ static void mainloop(void) {
     poll_params.update = POLLING_DO_NOT_CHANGE;
 
     while (1) {
-        struct epoll_event events[maxevents];
+        struct epoll_event events[MAX_EPOLL_EVENTS];
         int nevents;
         int i;
 
@@ -2861,11 +2935,41 @@ static void mainloop(void) {
     }
 }
 
-int main(int argc __unused, char **argv __unused) {
-    struct sched_param param = {
-            .sched_priority = 1,
-    };
+int issue_reinit() {
+    LMKD_CTRL_PACKET packet;
+    size_t size;
+    int sock;
 
+    sock = lmkd_connect();
+    if (sock < 0) {
+        ALOGE("failed to connect to lmkd: %s", strerror(errno));
+        return -1;
+    }
+
+    enum update_props_result res = lmkd_update_props(sock);
+    switch (res) {
+    case UPDATE_PROPS_SUCCESS:
+        ALOGI("lmkd updated properties successfully");
+        break;
+    case UPDATE_PROPS_SEND_ERR:
+        ALOGE("failed to send lmkd request: %s", strerror(errno));
+        break;
+    case UPDATE_PROPS_RECV_ERR:
+        ALOGE("failed to receive lmkd reply: %s", strerror(errno));
+        break;
+    case UPDATE_PROPS_FORMAT_ERR:
+        ALOGE("lmkd reply is invalid");
+        break;
+    case UPDATE_PROPS_FAIL:
+        ALOGE("lmkd failed to update its properties");
+        break;
+    }
+
+    close(sock);
+    return res == UPDATE_PROPS_SUCCESS ? 0 : -1;
+}
+
+static void update_props() {
     /* By default disable low level vmpressure events */
     level_oomadj[VMPRESS_LEVEL_LOW] =
         property_get_int32("ro.lmk.low", OOM_SCORE_ADJ_MAX + 1);
@@ -2901,6 +3005,17 @@ int main(int argc __unused, char **argv __unused) {
         low_ram_device ? DEF_THRASHING_LOWRAM : DEF_THRASHING));
     thrashing_limit_decay_pct = clamp(0, 100, property_get_int32("ro.lmk.thrashing_limit_decay",
         low_ram_device ? DEF_THRASHING_DECAY_LOWRAM : DEF_THRASHING_DECAY));
+}
+
+int main(int argc, char **argv) {
+    if ((argc > 1) && argv[1] && !strcmp(argv[1], "--reinit")) {
+        if (property_set(LMKD_REINIT_PROP, "0")) {
+            ALOGE("Failed to reset " LMKD_REINIT_PROP " property");
+        }
+        return issue_reinit();
+    }
+
+    update_props();
 
     ctx = create_android_logger(KILLINFO_LOG_TAG);
 
@@ -2925,6 +3040,9 @@ int main(int argc __unused, char **argv __unused) {
             }
 
             /* CAP_NICE required */
+            struct sched_param param = {
+                    .sched_priority = 1,
+            };
             if (sched_setscheduler(0, SCHED_FIFO, &param)) {
                 ALOGW("set SCHED_FIFO failed %s", strerror(errno));
             }
