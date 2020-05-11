@@ -1947,7 +1947,6 @@ static int find_and_kill_process(int min_score_adj, int kill_reason, const char 
 }
 
 static int64_t get_memory_usage(struct reread_data *file_data) {
-    int ret;
     int64_t mem_usage;
     char *buf;
 
@@ -2102,8 +2101,8 @@ static void mp_event_psi(int data, uint32_t events, struct polling_params *poll_
     }
 
     bool kill_pending = is_kill_pending();
-    if (kill_pending &&
-        (kill_timeout_ms == 0 || get_time_diff_ms(&last_kill_tm, &curr_tm) < kill_timeout_ms)) {
+    if (kill_pending && (kill_timeout_ms == 0 ||
+        get_time_diff_ms(&last_kill_tm, &curr_tm) < static_cast<long>(kill_timeout_ms))) {
         /* Skip while still killing a process */
         goto no_kill;
     }
@@ -2280,7 +2279,6 @@ no_kill:
 }
 
 static void mp_event_common(int data, uint32_t events, struct polling_params *poll_params) {
-    int ret;
     unsigned long long evcount;
     int64_t mem_usage, memsw_usage;
     int64_t mem_pressure;
@@ -2335,7 +2333,8 @@ static void mp_event_common(int data, uint32_t events, struct polling_params *po
         return;
     }
 
-    if (kill_timeout_ms && get_time_diff_ms(&last_kill_tm, &curr_tm) < kill_timeout_ms) {
+    if (kill_timeout_ms &&
+        get_time_diff_ms(&last_kill_tm, &curr_tm) < static_cast<long>(kill_timeout_ms)) {
         /*
          * If we're within the no-kill timeout, see if there's pending reclaim work
          * from the last killed process. If so, skip killing for now.
@@ -2959,8 +2958,6 @@ static void mainloop(void) {
 }
 
 int issue_reinit() {
-    LMKD_CTRL_PACKET packet;
-    size_t size;
     int sock;
 
     sock = lmkd_connect();
