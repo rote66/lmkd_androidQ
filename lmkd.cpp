@@ -1922,10 +1922,10 @@ static int kill_one_process(struct proc* procp, int min_oom_score, int kill_reas
     killinfo_log(procp, min_oom_score, tasksize, kill_reason, mi, wi, tm);
 
     if (kill_desc) {
-        ALOGI("Kill '%s' (%d), uid %d, oom_adj %d to free %ldkB; reason: %s", taskname, pid,
+        ALOGI("Kill '%s' (%d), uid %d, oom_score_adj %d to free %ldkB; reason: %s", taskname, pid,
               uid, procp->oomadj, tasksize * page_k, kill_desc);
     } else {
-        ALOGI("Kill '%s' (%d), uid %d, oom_adj %d to free %ldkB", taskname, pid,
+        ALOGI("Kill '%s' (%d), uid %d, oom_score_adj %d to free %ldkB", taskname, pid,
               uid, procp->oomadj, tasksize * page_k);
     }
 
@@ -1944,7 +1944,7 @@ out:
 }
 
 /*
- * Find one process to kill at or above the given oom_adj level.
+ * Find one process to kill at or above the given oom_score_adj level.
  * Returns size of the killed process.
  */
 static int find_and_kill_process(int min_score_adj, int kill_reason, const char *kill_desc,
@@ -2590,15 +2590,14 @@ do_kill:
 
         /* Log whenever we kill or when report rate limit allows */
         if (use_minfree_levels) {
-            ALOGI("Reclaimed %ldkB, cache(%ldkB) and "
-                "free(%" PRId64 "kB)-reserved(%" PRId64 "kB) below min(%ldkB) for oom_adj %d",
+            ALOGI("Reclaimed %ldkB, cache(%ldkB) and free(%" PRId64 "kB)-reserved(%" PRId64 "kB) "
+                "below min(%ldkB) for oom_score_adj %d",
                 pages_freed * page_k,
                 other_file * page_k, mi.field.nr_free_pages * page_k,
                 zi.totalreserve_pages * page_k,
                 minfree * page_k, min_score_adj);
         } else {
-            ALOGI("Reclaimed %ldkB at oom_adj %d",
-                pages_freed * page_k, min_score_adj);
+            ALOGI("Reclaimed %ldkB at oom_score_adj %d", pages_freed * page_k, min_score_adj);
         }
 
         if (report_skip_count > 0) {
