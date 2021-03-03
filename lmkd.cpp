@@ -201,6 +201,7 @@ static int psi_partial_stall_ms;
 static int psi_complete_stall_ms;
 static int thrashing_limit_pct;
 static int thrashing_limit_decay_pct;
+static int thrashing_critical_pct;
 static bool use_psi_monitors = false;
 static struct kernel_poll_info kpoll_info;
 static struct psi_threshold psi_thresholds[VMPRESS_LEVEL_COUNT] = {
@@ -2301,8 +2302,8 @@ static void mp_event_psi(int data, uint32_t events, struct polling_params *poll_
         snprintf(kill_desc, sizeof(kill_desc), "device is low on swap (%" PRId64
             "kB < %" PRId64 "kB) and thrashing (%" PRId64 "%%)",
             mi.field.free_swap * page_k, swap_low_threshold * page_k, thrashing);
-        /* Do not kill perceptible apps unless below min watermark */
-        if (wmark > WMARK_MIN) {
+        /* Do not kill perceptible apps unless below min watermark or heavily thrashing */
+        if (wmark > WMARK_MIN && thrashing < thrashing_critical_pct) {
             min_score_adj = PERCEPTIBLE_APP_ADJ + 1;
         }
     } else if (swap_is_low && wmark < WMARK_HIGH) {
@@ -2311,8 +2312,8 @@ static void mp_event_psi(int data, uint32_t events, struct polling_params *poll_
         snprintf(kill_desc, sizeof(kill_desc), "%s watermark is breached and swap is low (%"
             PRId64 "kB < %" PRId64 "kB)", wmark > WMARK_LOW ? "min" : "low",
             mi.field.free_swap * page_k, swap_low_threshold * page_k);
-        /* Do not kill perceptible apps unless below min watermark */
-        if (wmark > WMARK_MIN) {
+        /* Do not kill perceptible apps unless below min watermark or heavily thrashing */
+        if (wmark > WMARK_MIN && thrashing < thrashing_critical_pct) {
             min_score_adj = PERCEPTIBLE_APP_ADJ + 1;
         }
     } else if (wmark < WMARK_HIGH && thrashing > thrashing_limit) {
@@ -2321,16 +2322,20 @@ static void mp_event_psi(int data, uint32_t events, struct polling_params *poll_
         snprintf(kill_desc, sizeof(kill_desc), "%s watermark is breached and thrashing (%"
             PRId64 "%%)", wmark > WMARK_LOW ? "min" : "low", thrashing);
         cut_thrashing_limit = true;
-        /* Do not kill perceptible apps because of thrashing */
-        min_score_adj = PERCEPTIBLE_APP_ADJ + 1;
+        /* Do not kill perceptible apps unless thrashing at critical levels */
+        if (thrashing < thrashing_critical_pct) {
+            min_score_adj = PERCEPTIBLE_APP_ADJ + 1;
+        }
     } else if (reclaim == DIRECT_RECLAIM && thrashing > thrashing_limit) {
         /* Page cache is thrashing while in direct reclaim (mostly happens on lowram devices) */
         kill_reason = DIRECT_RECL_AND_THRASHING;
         snprintf(kill_desc, sizeof(kill_desc), "device is in direct reclaim and thrashing (%"
             PRId64 "%%)", thrashing);
         cut_thrashing_limit = true;
-        /* Do not kill perceptible apps because of thrashing */
-        min_score_adj = PERCEPTIBLE_APP_ADJ + 1;
+        /* Do not kill perceptible apps unless thrashing at critical levels */
+        if (thrashing < thrashing_critical_pct) {
+            min_score_adj = PERCEPTIBLE_APP_ADJ + 1;
+        }
     }
 
     /* Kill a process if necessary */
@@ -3126,6 +3131,8 @@ static void update_props() {
         low_ram_device ? DEF_THRASHING_LOWRAM : DEF_THRASHING));
     thrashing_limit_decay_pct = clamp(0, 100, property_get_int32("ro.lmk.thrashing_limit_decay",
         low_ram_device ? DEF_THRASHING_DECAY_LOWRAM : DEF_THRASHING_DECAY));
+    thrashing_critical_pct = max(0, property_get_int32("ro.lmk.thrashing_limit_critical",
+        thrashing_limit_pct * 2));
 }
 
 int main(int argc, char **argv) {
