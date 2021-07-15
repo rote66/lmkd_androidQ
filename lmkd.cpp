@@ -202,6 +202,7 @@ static int psi_complete_stall_ms;
 static int thrashing_limit_pct;
 static int thrashing_limit_decay_pct;
 static int thrashing_critical_pct;
+static int64_t filecache_min_kb;
 static bool use_psi_monitors = false;
 static struct kernel_poll_info kpoll_info;
 static struct psi_threshold psi_thresholds[VMPRESS_LEVEL_COUNT] = {
@@ -2112,6 +2113,7 @@ static void mp_event_psi(int data, uint32_t events, struct polling_params *poll_
         LOW_MEM_AND_SWAP,
         LOW_MEM_AND_THRASHING,
         DIRECT_RECL_AND_THRASHING,
+        LOW_FILECACHE_AFTER_THRASHING,
         KILL_REASON_COUNT
     };
     enum reclaim_state {
@@ -2132,6 +2134,7 @@ static void mp_event_psi(int data, uint32_t events, struct polling_params *poll_
     static struct wakeup_info wi;
     static struct timespec thrashing_reset_tm;
     static int64_t prev_thrash_growth = 0;
+    static bool check_filecache = false;
 
     union meminfo mi;
     union vmstat vs;
@@ -2219,7 +2222,7 @@ static void mp_event_psi(int data, uint32_t events, struct polling_params *poll_
      * important for a slow growing refault case. While retrying, we should keep
      * monitoring new thrashing counter as someone could release the memory to mitigate
      * the thrashing. Thus, when thrashing reset window comes, we decay the prev thrashing
-     * counter by window counts. if the counter is still greater than thrashing limit,
+     * counter by window counts. If the counter is still greater than thrashing limit,
      * we preserve the current prev_thrash counter so we will retry kill again. Otherwise,
      * we reset the prev_thrash counter so we will stop retrying.
      */
@@ -2301,6 +2304,7 @@ static void mp_event_psi(int data, uint32_t events, struct polling_params *poll_
         if (wmark > WMARK_MIN && thrashing < thrashing_critical_pct) {
             min_score_adj = PERCEPTIBLE_APP_ADJ + 1;
         }
+        check_filecache = true;
     } else if (swap_is_low && wmark < WMARK_HIGH) {
         /* Both free memory and swap are low */
         kill_reason = LOW_MEM_AND_SWAP;
@@ -2321,6 +2325,7 @@ static void mp_event_psi(int data, uint32_t events, struct polling_params *poll_
         if (thrashing < thrashing_critical_pct) {
             min_score_adj = PERCEPTIBLE_APP_ADJ + 1;
         }
+        check_filecache = true;
     } else if (reclaim == DIRECT_RECLAIM && thrashing > thrashing_limit) {
         /* Page cache is thrashing while in direct reclaim (mostly happens on lowram devices) */
         kill_reason = DIRECT_RECL_AND_THRASHING;
@@ -2330,6 +2335,21 @@ static void mp_event_psi(int data, uint32_t events, struct polling_params *poll_
         /* Do not kill perceptible apps unless thrashing at critical levels */
         if (thrashing < thrashing_critical_pct) {
             min_score_adj = PERCEPTIBLE_APP_ADJ + 1;
+        }
+        check_filecache = true;
+    } else if (check_filecache) {
+        int64_t file_lru_kb = (vs.field.nr_inactive_file + vs.field.nr_active_file) * page_k;
+
+        if (file_lru_kb < filecache_min_kb) {
+            /* File cache is too low after thrashing, keep killing background processes */
+            kill_reason = LOW_FILECACHE_AFTER_THRASHING;
+            snprintf(kill_desc, sizeof(kill_desc),
+                "filecache is low (%" PRId64 "kB < %" PRId64 "kB) after thrashing",
+                file_lru_kb, filecache_min_kb);
+            min_score_adj = PERCEPTIBLE_APP_ADJ + 1;
+        } else {
+            /* File cache is big enough, stop checking */
+            check_filecache = false;
         }
     }
 
@@ -3127,6 +3147,7 @@ static void update_props() {
         low_ram_device ? DEF_THRASHING_DECAY_LOWRAM : DEF_THRASHING_DECAY));
     thrashing_critical_pct = max(0, property_get_int32("ro.lmk.thrashing_limit_critical",
         thrashing_limit_pct * 2));
+    filecache_min_kb = property_get_int64("ro.lmk.filecache_min_kb", 0);
 }
 
 int main(int argc, char **argv) {
