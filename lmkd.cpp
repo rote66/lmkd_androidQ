@@ -2128,7 +2128,6 @@ static void mp_event_psi(int data, uint32_t events, struct polling_params *poll_
     static int64_t base_file_lru;
     static int64_t init_pgscan_kswapd;
     static int64_t init_pgscan_direct;
-    static int64_t swap_low_threshold;
     static bool killing;
     static int thrashing_limit = thrashing_limit_pct;
     static struct zone_watermarks watermarks;
@@ -2151,6 +2150,7 @@ static void mp_event_psi(int data, uint32_t events, struct polling_params *poll_
     char kill_desc[LINE_MAX];
     bool cut_thrashing_limit = false;
     int min_score_adj = 0;
+    int64_t swap_low_threshold;
     long since_thrashing_reset_ms;
 
     if (clock_gettime(CLOCK_MONOTONIC_COARSE, &curr_tm) != 0) {
@@ -2196,10 +2196,10 @@ static void mp_event_psi(int data, uint32_t events, struct polling_params *poll_
 
     /* Check free swap levels */
     if (swap_free_low_percentage) {
-        if (!swap_low_threshold) {
-            swap_low_threshold = mi.field.total_swap * swap_free_low_percentage / 100;
-        }
+        swap_low_threshold = mi.field.total_swap * swap_free_low_percentage / 100;
         swap_is_low = mi.field.free_swap < swap_low_threshold;
+    } else {
+        swap_low_threshold = 0;
     }
 
     /* Identify reclaim state */
