@@ -203,6 +203,7 @@ static int thrashing_limit_pct;
 static int thrashing_limit_decay_pct;
 static int thrashing_critical_pct;
 static int64_t filecache_min_kb;
+static int64_t stall_limit_critical;
 static bool use_psi_monitors = false;
 static struct kernel_poll_info kpoll_info;
 static struct psi_threshold psi_thresholds[VMPRESS_LEVEL_COUNT] = {
@@ -1640,6 +1641,37 @@ static int vmstat_parse(union vmstat *vs) {
     return 0;
 }
 
+static int psi_parse(struct reread_data *file_data, struct psi_stats stats[], bool full) {
+    char *buf;
+    char *save_ptr;
+    char *line;
+
+    if ((buf = reread_file(file_data)) == NULL) {
+        return -1;
+    }
+
+    line = strtok_r(buf, "\n", &save_ptr);
+    if (parse_psi_line(line, PSI_SOME, stats)) {
+        return -1;
+    }
+    if (full) {
+        line = strtok_r(NULL, "\n", &save_ptr);
+        if (parse_psi_line(line, PSI_FULL, stats)) {
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+static int psi_parse_mem(struct psi_data *psi_data) {
+    static struct reread_data file_data = {
+        .filename = PSI_PATH_MEMORY,
+        .fd = -1,
+    };
+    return psi_parse(&file_data, psi_data->mem_stats, true);
+}
+
 enum wakeup_reason {
     Event,
     Polling
@@ -2139,6 +2171,7 @@ static void mp_event_psi(int data, uint32_t events, struct polling_params *poll_
 
     union meminfo mi;
     union vmstat vs;
+    struct psi_data psi_data;
     struct timespec curr_tm;
     int64_t thrashing = 0;
     bool swap_is_low = false;
@@ -2152,6 +2185,7 @@ static void mp_event_psi(int data, uint32_t events, struct polling_params *poll_
     int min_score_adj = 0;
     int64_t swap_low_threshold;
     long since_thrashing_reset_ms;
+    bool critical_stall = false;
 
     if (clock_gettime(CLOCK_MONOTONIC_COARSE, &curr_tm) != 0) {
         ALOGE("Failed to get current time");
@@ -2276,6 +2310,9 @@ static void mp_event_psi(int data, uint32_t events, struct polling_params *poll_
     /* Find out which watermark is breached if any */
     wmark = get_lowest_watermark(&mi, &watermarks);
 
+    if (!psi_parse_mem(&psi_data)) {
+        critical_stall = psi_data.mem_stats[PSI_FULL].avg10 > (float)stall_limit_critical;
+    }
     /*
      * TODO: move this logic into a separate function
      * Decide if killing a process is necessary and record the reason
@@ -2357,6 +2394,11 @@ static void mp_event_psi(int data, uint32_t events, struct polling_params *poll_
 
     /* Kill a process if necessary */
     if (kill_reason != NONE) {
+        
+        /* Allow killing perceptible apps if the system is stalled */
+        if (critical_stall) {
+            min_score_adj = 0;
+        }
         int pages_freed = find_and_kill_process(min_score_adj, kill_reason, kill_desc, &mi,
                                                 &wi, &curr_tm);
         if (pages_freed > 0) {
@@ -3150,6 +3192,7 @@ static void update_props() {
     thrashing_critical_pct = max(0, property_get_int32("ro.lmk.thrashing_limit_critical",
         thrashing_limit_pct * 2));
     filecache_min_kb = property_get_int64("ro.lmk.filecache_min_kb", 0);
+    stall_limit_critical = property_get_int64("stall_limit_critical", 100);
 }
 
 int main(int argc, char **argv) {
