@@ -31,13 +31,13 @@
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
-#include <sys/syscall.h>
+
 #include <sys/sysinfo.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
-
+#include <liblmkd_backport.h>
 #include <cutils/properties.h>
 #include <cutils/sched_policy.h>
 #include <cutils/sockets.h>
