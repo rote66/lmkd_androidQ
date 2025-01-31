@@ -1730,7 +1730,7 @@ static void killinfo_log(struct proc* procp, int min_oom_score, int tasksize,
     android_log_write_int32(ctx, wi->skipped_wakeups);
 
     android_log_write_list(ctx, LOG_ID_EVENTS);
-    android_log_reset(ctx);
+    //android_log_reset(ctx);
 }
 
 static struct proc *proc_adj_lru(int oomadj) {
