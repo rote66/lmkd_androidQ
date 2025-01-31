@@ -1,7 +1,8 @@
-Android Low Memory Killer Daemon For Android Q
+Android Low Memory Killer Daemon For Android P
 ================================
+Tested Android P Kernel-4.4
 
-This is a self-used branch to solve the problem that android10 stock lmkd doesn't support adjusting PSI-related parameters via prop, which leads to abnormal usage on low-configuration devices.
+This is a self-used branch to solve the problem that android-9 stock lmkd doesn't support PSI.
 
 Pick some upstream changes without upgrading android and changing the lmkd.rc file.
 
