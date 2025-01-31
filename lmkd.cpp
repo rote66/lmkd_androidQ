@@ -39,13 +39,13 @@
 #include <unistd.h>
 #include <liblmkd_backport.h>
 #include <cutils/properties.h>
+#include <cutils/sched_policy.h>
 #include <cutils/sockets.h>
 #include <liblmkd_utils.h>
 #include <lmkd.h>
 #include <log/log.h>
 #include <log/log_event_list.h>
 #include <log/log_time.h>
-#include <processgroup/processgroup.h>
 #include <psi/psi.h>
 #include <system/thread_defs.h>
 
@@ -1760,8 +1760,7 @@ static struct proc *proc_get_heaviest(int oomadj) {
     return maxprocp;
 }
 
-static void set_process_group_and_prio(int pid, const std::vector<std::string>& profiles,
-                                       int prio) {
+static void set_process_group_and_prio(int pid, SchedPolicy sp, int prio) {
     DIR* d;
     char proc_path[PATH_MAX];
     struct dirent* de;
@@ -1788,8 +1787,8 @@ static void set_process_group_and_prio(int pid, const std::vector<std::string>& 
             ALOGW("Unable to raise priority of killing t_pid (%d): errno=%d", t_pid, errno);
         }
 
-        if (!SetTaskProfiles(t_pid, profiles)) {
-            ALOGW("Failed to set task_profiles on pid(%d) t_pid(%d)", pid, t_pid);
+        if (set_cpuset_policy(t_pid, sp)) {
+            ALOGW("Failed to set_cpuset_policy on pid(%d) t_pid(%d) to %d", pid, t_pid, (int)sp);
             continue;
         }
     }
@@ -1947,8 +1946,7 @@ static int kill_one_process(struct proc* procp, int min_oom_score, int kill_reas
         goto out;
     }
 
-    set_process_group_and_prio(pid, {"CPUSET_SP_BACKGROUND", "SCHED_SP_FOREGROUND"},
-                               ANDROID_PRIORITY_HIGHEST);
+    set_process_group_and_prio(pid, SP_FOREGROUND, ANDROID_PRIORITY_HIGHEST);
 
     last_kill_tm = *tm;
 
