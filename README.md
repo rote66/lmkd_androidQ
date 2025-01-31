@@ -11,4 +11,6 @@ How to compile:
 
 <NDK-PATH>/toolchains/llvm/prebuilt/linux-x86_64/bin/clang -target aarch64-linux-android* -shared -fPIC -o liblmkd_shims liblmkd_shims.c
 
+<NDK-PATH>/toolchains/llvm/prebuilt/linux-x86_64/bin/clang -target aarch64-linux-android* -shared -fPIC -o lmkd lmkd-wrapper.c
+
 put .so file -> /system/lib64
